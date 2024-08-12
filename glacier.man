@@ -1,0 +1,37 @@
+.Dd 8/12/12
+.Dt glacier
+.Os Ubuntu
+.Sh NAME
+.Nm glacier,
+.\" The following lines are read in generating the apropos(man -k) database. Use only key
+.\" words here as the database is built based on the words here and in the .ND line.
+.Nd Manage backup, verification, and restoration of data between the configurable ZFS pools.
+.Sh SYNOPSIS             \" Section Header - required - don't modify
+.Nm
+.Op Cm backup | verify | restore | status | log
+.Sh DESCRIPTION          \" Section Header - required - don't modify
+The glacier command provides a comprehensive interface to manage backup, verification, and restoration processes for data stored on the configurable ZFS backup pool and the main ZFS pool.
+The command offers the following options:
+A list of items with descriptions:
+.Bl -tag -width -indent  \" Begins a tagged list
+.It Em backup               \" Each item preceded by .It macro
+Initiate a backup process. The command will create a snapshot ofthe current data in the main pool and send it to the backup pool with compression enabled. Upon completion, a report will be emailed to the configured email address, with a footer indicatinghow to get more information about interacting with glacier backups.
+
+
+.It Em verify
+Run a verification process on the backup pool. This process includes a ZFS scrub and will send an email notification if any errors are found during the scrub.
+
+
+.It Em restore
+Restore data from the backup pool to the main pool. The command will display the latest backup date, the size of the backup, and the current size of the main pool before prompting the user for confirmation to proceed.
+
+
+.It Em status
+Display the latest backup date, the size of the backup, and the current size of the main pool. This option can be accessed by non-root users.
+
+
+.It Em log
+Tail the log file.
+
+
+.El
