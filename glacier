@@ -1,0 +1,174 @@
+#!/bin/bash
+
+# Configurable Variables
+BACKUP_POOL="glacierlake"
+MAIN_POOL="bytelake"
+LOGFILE="/var/log/glacier.log"
+EMAIL="email@example.com"
+TMP_LOGFILE=$(mktemp)
+ROOT_REQUIRED=1
+
+# Helper Functions
+root_check() {
+    # Ensure the script is run as root
+    if [ "$EUID" -ne 0 ]; then 
+        echo "Please run as root"
+        exit 1
+    fi
+}
+
+import_pool() {
+    sudo zpool import $BACKUP_POOL || { echo "Error: Could not import $BACKUP_POOL" >&2; exit 1; }
+}
+
+export_pool() {
+    sudo zpool export $BACKUP_POOL || { echo "Error: Could not export $BACKUP_POOL" >&2; exit 1; }
+}
+
+get_last_backup_info() {
+    LAST_SNAPSHOT=$(sudo zfs list -t snapshot -o name -s creation $BACKUP_POOL/backup | tail -1)
+    LAST_BACKUP_DATE=$(sudo zfs get creation -H -o value $LAST_SNAPSHOT)
+    BACKUP_SIZE=$(sudo zfs list $BACKUP_POOL/backup -o used -H)
+    MAINPOOL_SIZE=$(zfs list $MAIN_POOL -o used -H)
+}
+
+send_email_report() {
+    echo -e "\nFor more information on interacting with glacier backups, check 'man glacier'." >> "$TMP_LOGFILE"
+    mail -s "swiwa Weekly Backup ($BACKUP_POOL) Report" "$EMAIL" < "$TMP_LOGFILE"
+}
+
+cleanup() {
+
+    # Ensure the script is run as root
+    if [ "$ROOT_REQUIRED" -ne 0 ]; then 
+        cat "$TMP_LOGFILE" >> "$LOGFILE"
+        rm -f "$TMP_LOGFILE"
+    fi
+}
+
+trap cleanup EXIT
+
+backup() {
+    root_check
+    {
+        echo "Backup process started at $(date)"
+
+        import_pool
+
+        SNAPSHOT_NAME="weekly-backup-$(date +'%Y-%m-%d')"
+        sudo zfs snapshot -r $MAIN_POOL@$SNAPSHOT_NAME || { echo "Error: Could not create snapshot $SNAPSHOT_NAME" >&2; exit 1; }
+        sudo zfs send -R -c $MAIN_POOL@$SNAPSHOT_NAME | sudo zfs receive -F $BACKUP_POOL/backup || { echo "Error: Snapshot transfer failed" >&2; exit 1; }
+
+        get_last_backup_info
+
+        echo "Backup completed. Details:"
+        echo "Last backup date: $LAST_BACKUP_DATE"
+        echo "Size of the $BACKUP_POOL backup: $BACKUP_SIZE"
+        echo "Current size of the $MAIN_POOL pool: $MAINPOOL_SIZE"
+
+        export_pool
+
+        echo "Backup process completed at $(date)"
+    } >> "$TMP_LOGFILE" 2>&1
+
+    # Append to persistent log file
+    cat "$TMP_LOGFILE" >> "$LOGFILE"
+
+    # Send email with the temporary log
+    send_email_report
+}
+
+verify() {
+    root_check
+    {
+        echo "Backup verification started at $(date)"
+
+        import_pool
+
+        sudo zpool scrub $BACKUP_POOL || { echo "Error: Scrub initiation failed" >&2; exit 1; }
+
+        while [ "$(sudo zpool status $BACKUP_POOL | grep 'scrub in progress')" ]; do
+            sleep 600  # Check every 10 minutes
+        done
+
+        SCRUB_ERRORS=$(sudo zpool status $BACKUP_POOL | grep 'scan: scrub' | grep -E 'errors|canceled')
+
+        if [ -n "$SCRUB_ERRORS" ]; then
+            echo "Error: Issues found during scrub"
+            echo "$SCRUB_ERRORS"
+            mail -s "swiwa Backup ($BACKUP_POOL) Verification Failed" "$EMAIL" < "$TMP_LOGFILE"
+        else
+            echo "Backup verification completed successfully."
+        fi
+
+        export_pool
+    } >> "$TMP_LOGFILE" 2>&1
+}
+
+restore() {
+    root_check
+
+    import_pool
+
+    get_last_backup_info
+
+    echo "Last backup date: $LAST_BACKUP_DATE"
+    echo "Size of the $BACKUP_POOL backup: $BACKUP_SIZE"
+    echo "Current size of the $MAIN_POOL pool: $MAINPOOL_SIZE"
+    echo
+    read -p "Are you sure you want to restore from the $BACKUP_POOL backup? This will overwrite the current data in $MAIN_POOL. (y/N) " -n 1 -r
+    echo
+
+    if [[ ! $REPLY =~ ^[Yy]$ ]]
+    then
+        echo "Restoration aborted by user."
+        export_pool
+        exit 1
+    fi
+
+    echo "Starting restoration process..."
+
+    sudo zfs rollback -r $MAIN_POOL@$LAST_SNAPSHOT || { echo "Error: Could not rollback to $LAST_SNAPSHOT" >&2; export_pool; exit 1; }
+    sudo zfs send -R $LAST_SNAPSHOT | sudo zfs receive -F $MAIN_POOL || { echo "Error: Snapshot restoration failed" >&2; export_pool; exit 1; }
+
+    echo "Restoration completed successfully."
+
+    export_pool
+}
+
+status() {
+    get_last_backup_info
+
+    echo "Last backup date: $LAST_BACKUP_DATE"
+    echo "Size of the $BACKUP_POOL backup: $BACKUP_SIZE"
+    echo "Current size of the $MAIN_POOL pool: $MAINPOOL_SIZE"
+}
+
+log() {
+    root_check
+    tail -f "$LOGFILE"
+}
+
+# Main Command Logic
+case "$1" in
+    backup)
+        backup
+        ;;
+    verify)
+        verify
+        ;;
+    restore)
+        restore
+        ;;
+    status|"")
+        ROOT_REQUIRED=0
+        status
+        ;;
+    log)
+        log
+        ;;
+    *)
+        echo "Usage: glacier {backup|verify|restore|status|log}"
+        exit 1
+        ;;
+esac
